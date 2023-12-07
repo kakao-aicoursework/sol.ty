@@ -4,7 +4,7 @@ import tkinter as tk
 import pandas as pd
 from tkinter import scrolledtext
 import tkinter.filedialog as filedialog
-openai.api_key = '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'
+openai.api_key = ''
 
 
 # response에 CSV 형식이 있는지 확인하고 있으면 저장하기
