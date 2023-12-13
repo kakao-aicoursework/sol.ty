@@ -1,49 +1,56 @@
 from dto import ChatbotRequest
-import aiohttp
+import requests
 import time
 import logging
-import openai
-
+from langchain.agents import AgentType, Tool, initialize_agent
+from langchain.chains import SequentialChain, LLMChain
 from langchain.chat_models import ChatOpenAI
-from langchain.prompts.chat import ChatPromptTemplate
-from langchain.chains import LLMChain
-from langchain.chains import SequentialChain
+from langchain.document_loaders import TextLoader
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.prompts.chat import (
+    ChatPromptTemplate,
+)
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.vectorstores import Chroma
 
-import os
+import requests
 
-# audience_knowledge_level = "moderate"
-
-# 환경 변수 처리 필요!
-# openai.api_key = ''
-# SYSTEM_MSG = f"""
-# You are a provide of Kakao service.
-#
-# - Role: Explain about Kakao API
-# - Audience's language: Korean
-# - Audience's knowledge level: {audience_knowledge_level}
-# """
 logger = logging.getLogger("Callback")
 
+DATA_PATH = "../data/project_data_카카오싱크.txt"
+STEP5_1_PROMPT_TEMPLATE = "./prompts/5_callback/template_5_1_knowledge_level.txt"
+STEP5_2_PROMPT_TEMPLATE = "./prompts/5_callback/template_5_2_guide.txt"
+
+
 def create_chain(llm, template_path, output_key):
+    def _read_prompt_template(file_path: str) -> str:
+        with open(file_path, "r") as f:
+            prompt_template = f.read()
+
+        return prompt_template
+
     return LLMChain(
         llm=llm,
         prompt=ChatPromptTemplate.from_template(
-            template=read_prompt_template(template_path),
+            template=_read_prompt_template(template_path),
         ),
         output_key=output_key,
         verbose=True,
     )
 
-def generate_guide(question) -> dict[str, str]:
 
-    STEP4_1_PROMPT_TEMPLATE = "./prompts/4_langchain_chain/template_4_1_knowledge_level.txt"
-    STEP4_2_PROMPT_TEMPLATE = "./prompts/4_langchain_chain/template_4_2_guide.txt"
+def generate_guide(question, llm) -> dict[str, str]:
+    knowledge_level_chain = create_chain(
+        llm,
+        STEP5_1_PROMPT_TEMPLATE,
+        "knowledge_level",
+    )
 
-    kakao_expert_llm = ChatOpenAI(temperature=0.1, max_tokens=500, model="gpt-3.5-turbo")
-
-    knowledge_level_chain = create_chain(kakao_expert_llm, STEP4_1_PROMPT_TEMPLATE, "knowledge_level")
-
-    guide_chain = create_chain(kakao_expert_llm, STEP4_2_PROMPT_TEMPLATE, "output")
+    guide_chain = create_chain(
+        llm,
+        STEP5_2_PROMPT_TEMPLATE,
+        "output",
+    )
 
     preprocess_chain = SequentialChain(
         chains=[
@@ -60,15 +67,101 @@ def generate_guide(question) -> dict[str, str]:
     )
     context = preprocess_chain(context)
 
+    # run
     context["question"] = question
-
     context = guide_chain(context)
 
     return context["output"]
 
 
-async def callback_handler(request: ChatbotRequest) -> dict:
+def search_db(query: str):
+    def _query_db(query: str, use_retriever: bool = False) -> list[str]:
+        if use_retriever:
+            docs = _retriever.get_relevant_documents(query)
+        else:
+            docs = _db.similarity_search(query)
 
+        str_docs = [doc.page_content for doc in docs]
+        return str_docs
+
+    loader = TextLoader(DATA_PATH)
+    documents = loader.load()
+
+    text_splitter = CharacterTextSplitter(chunk_size=512, chunk_overlap=128)
+    texts = text_splitter.split_documents(documents)
+
+    _db = Chroma.from_documents(
+        texts,
+        OpenAIEmbeddings(),
+        collection_name="kakao_sync",
+    )
+
+    _retriever = _db.as_retriever()
+
+    query_result = _query_db(
+        query=query,
+        use_retriever=True,
+    )
+
+    search_results = []
+    for document in query_result:
+        search_results.append(
+            {
+                "content": document.split(':')[1]
+            }
+        )
+
+    return search_results
+
+
+def prompt_with_langchain(query, model="gpt-3.5-turbo", temperature=0.0, max_tokens=512, use_functions=True):
+    kakao_expert_llm = ChatOpenAI(
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    guide = generate_guide(
+        question=query,
+        llm=kakao_expert_llm,
+    )
+    if use_functions:
+        print("functions 사용 - agent를 생성해 문제에 응답합니다")
+
+        functions = [
+            {
+                "name": "search_db",
+                "func": lambda x: search_db(guide),
+                "description": "Function to search extra information related to query from the database of Kakao sync"
+            }
+        ]
+
+        tools = [
+            Tool(
+                **func
+            ) for func in functions
+        ]
+
+        agent = initialize_agent(
+            tools,
+            kakao_expert_llm,
+            agent=AgentType.OPENAI_FUNCTIONS,
+            verbose=True
+        )
+
+        result = agent.run(
+            query
+        )
+
+    else:
+        print("functions 미사용 - multi chain 으로 문제에 응답합니다.")
+
+        result = guide
+
+    return result
+
+
+def callback_handler(request: ChatbotRequest) -> dict:
     # ===================== start =================================
     # response = openai.ChatCompletion.create(
     #     model="gpt-3.5-turbo",
@@ -81,9 +174,15 @@ async def callback_handler(request: ChatbotRequest) -> dict:
     # # focus
     # output_text = response.choices[0].message.content
 
-    output_text = generate_guide(request.userRequest.utterance)
+    output_text = prompt_with_langchain(
+        query=request.userRequest.utterance,
+        use_functions=True,
+        max_tokens=2048,
+    )
 
-   # 참고링크 통해 payload 구조 확인 가능
+    print(output_text)
+
+    # 참고링크 통해 payload 구조 확인 가능
     payload = {
         "version": "2.0",
         "template": {
@@ -105,6 +204,4 @@ async def callback_handler(request: ChatbotRequest) -> dict:
     url = request.userRequest.callbackUrl
 
     if url:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url=url, json=payload, ssl=False) as resp:
-                await resp.json()
+        requests.post(url, json=payload)
