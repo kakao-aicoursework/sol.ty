@@ -1,0 +1,16 @@
+Your job is to read the message and explain about {intent} API very detail  in <language> by web searching information.
+
+<message>
+{input}
+</message>
+
+<web search result>
+{compressed_web_search_results}
+<\web search result>
+
+<language>
+Korean
+</language>
+
+{chat_history}
+Answer:

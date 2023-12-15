@@ -1,0 +1,8 @@
+Your job is to select one chapter from the <chapter_list>.
+
+<chapter_list>
+{chapter_list}
+</chapter_list>
+
+User: {question}
+Intent:

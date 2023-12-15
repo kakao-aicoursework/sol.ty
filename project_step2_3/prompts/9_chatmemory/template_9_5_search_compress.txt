@@ -1,0 +1,15 @@
+Your job is to read the <message>, Extract message-related content from <search_results>
+
+<message>
+{question}
+</message>
+
+<search_results>
+{related_web_search_results}
+</search_results>
+
+<language>
+Korean
+</language>
+
+Compressed:
