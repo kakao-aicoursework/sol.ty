@@ -1,0 +1,20 @@
+Your job is to read the message and explain about {intent} API very detail by searching information from the corresponding vector DB and web searching.
+
+<message>
+{input}
+</message>
+
+<related documents>
+{related_documents}
+<\related documents>
+
+<web search result>
+{compressed_web_search_results}
+<\web search result>
+
+<language>
+Korean
+</language>
+
+{chat_history}
+Answer:

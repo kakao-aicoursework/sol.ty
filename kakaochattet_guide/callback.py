@@ -163,17 +163,6 @@ def prompt_with_langchain(query, model="gpt-3.5-turbo", temperature=0.0, max_tok
 
 def callback_handler(request: ChatbotRequest) -> dict:
     # ===================== start =================================
-    # response = openai.ChatCompletion.create(
-    #     model="gpt-3.5-turbo",
-    #     messages=[
-    #         {"role": "system", "content": SYSTEM_MSG},
-    #         {"role": "user", "content": request.userRequest.utterance},
-    #     ],
-    #     temperature=0,
-    # )
-    # # focus
-    # output_text = response.choices[0].message.content
-
     output_text = prompt_with_langchain(
         query=request.userRequest.utterance,
         use_functions=True,
