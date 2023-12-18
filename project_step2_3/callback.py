@@ -41,7 +41,7 @@ USE_RETRIEVER = True
 
 USE_FUNCTIONS = False
 MAX_TOKENS = 2048
-CONVERSATION_ID = 'abcdef'
+CONVERSATION_ID = 'solty1'
 
 intent_list = [
     "kakao_sync: Kakao sync API",
@@ -163,7 +163,7 @@ def search_db(intent: str, chapter: str, query: str, chunk_size: int=CHUNK_SIZE,
     db = Chroma.from_documents(
         documents=documents,
         embedding=OpenAIEmbeddings(),
-        collection_name="kakao_sync",
+        collection_name=intent,
     )
 
     retriever = db.as_retriever()
@@ -184,7 +184,6 @@ def generate_conversation_id() -> str:
             string.ascii_letters
         ) for i in range(6)
     )
-
 
 def generate_guide(question: str, llm: ChatOpenAI, conversation_id: str) -> str:
     guess_intent_chain = create_chain(
