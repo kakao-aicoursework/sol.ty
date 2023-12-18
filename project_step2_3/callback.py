@@ -5,7 +5,6 @@ import logging
 
 import os
 
-from langchain.agents import AgentType, initialize_agent
 from langchain.tools import Tool
 from langchain.chains import LLMChain
 from langchain.chat_models import ChatOpenAI
@@ -22,6 +21,9 @@ from langchain.memory import (
     FileChatMessageHistory,
 )
 
+import random
+import string
+from pprint import pprint
 
 logger = logging.getLogger("Callback")
 
@@ -32,10 +34,14 @@ STEP10_4_PROMPT_TEMPLATE = "./prompts/10_project3/template_10_4_default.txt"
 STEP10_5_PROMPT_TEMPLATE = "./prompts/10_project3/template_10_5_search_value_check.txt"
 STEP10_6_PROMPT_TEMPLATE = "./prompts/10_project3/template_10_6_search_compress.txt"
 
-CHUNK_SIZE = 512
+CHUNK_SIZE = 128
 CHUNK_OVERLAP = 0
 
 USE_RETRIEVER = True
+
+USE_FUNCTIONS = False
+MAX_TOKENS = 2048
+CONVERSATION_ID = 'abcdef'
 
 intent_list = [
     "kakao_sync: Kakao sync API",
@@ -78,12 +84,13 @@ def get_chapter_list(intent: str):
     with open(DATA_PATH_DICT[intent], "r") as file:
         data = file.readlines()
 
-    chapter_list = [text.replace("#", "").replace("\n", "").replace(" ", "") for text in data if text.startswith("#")]
+    chapter_list = [text.replace("#", "").replace("\n", "").strip() for text in data if text.startswith("#")]
 
+    pprint(chapter_list)
     return chapter_list
 
 
-def query_web_search(question: str, search_value_check_chain: ChatPromptTemplate, search_compression_chain: ChatPromptTemplate) -> str:
+def query_web_search(question: str, search_tool: Tool, search_value_check_chain: LLMChain, search_compression_chain: LLMChain) -> str:
     context = {"question": question}
     context["related_web_search_results"] = search_tool.run(question)
 
@@ -119,17 +126,17 @@ def get_chat_history(conversation_id: str):
     return memory.buffer
 
 
-def search_db(intent: str, query: str, chunk_size: int=CHUNK_SIZE, chunk_overlap:int=CHUNK_OVERLAP, use_retriever: bool=True):
-    def _prepare_data(intent: str, chunk_size: int, chunk_overlap: int):
+def search_db(intent: str, chapter: str, query: str, chunk_size: int=CHUNK_SIZE, chunk_overlap:int=CHUNK_OVERLAP, use_retriever: bool=True):
+    def _prepare_data(intent: str, chapter: str, chunk_size: int, chunk_overlap: int):
         loader = TextLoader(DATA_PATH_DICT[intent])
         documents = loader.load()
 
         text_splitter = CharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        texts = text_splitter.split_documents(documents)
+        documents = text_splitter.split_documents(documents)
 
-        return texts
+        return documents
 
-    def _query_db(query: str, db, retriever, use_retriever: bool) -> list[str]:
+    def _query_db(query: str, db, retriever, use_retriever: bool) -> str:
         if use_retriever:
             docs = retriever.get_relevant_documents(query)
         else:
@@ -139,23 +146,23 @@ def search_db(intent: str, query: str, chunk_size: int=CHUNK_SIZE, chunk_overlap
         stored_docs = [docs[0].page_content]
         for doc in docs[1:]:
             for stored_doc in stored_docs:
-                if doc.page_content in stored_doc or \
-                        stored_doc in doc.page_content:
-                    store_doc = doc.page_content if len(doc.page_content) >= len(stored_doc) else stored_doc
+                if doc.page_content in stored_doc or stored_doc in doc.page_content:
+                    stored_doc = doc.page_content if len(doc.page_content) >= len(stored_doc) else stored_doc
                 else:
                     stored_docs.append(doc.page_content)
 
         return "\n".join(stored_docs)
 
-    texts = _prepare_data(
+    documents = _prepare_data(
         intent=intent,
+        chapter=chapter,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
 
     db = Chroma.from_documents(
-        texts,
-        OpenAIEmbeddings(),
+        documents=documents,
+        embedding=OpenAIEmbeddings(),
         collection_name="kakao_sync",
     )
 
@@ -165,13 +172,21 @@ def search_db(intent: str, query: str, chunk_size: int=CHUNK_SIZE, chunk_overlap
         query=query,
         db=db,
         retriever=retriever,
-        use_retriever=USE_RETRIEVER,
+        use_retriever=use_retriever,
     )
 
     return query_result
 
 
-def generate_guide(question: str, llm: ChatOpenAI, conversation_id: str='fa1010') -> dict[str, str]:
+def generate_conversation_id() -> str:
+    return ''.join(
+        random.choice(
+            string.ascii_letters
+        ) for i in range(6)
+    )
+
+
+def generate_guide(question: str, llm: ChatOpenAI, conversation_id: str) -> str:
     guess_intent_chain = create_chain(
         llm=llm,
         template_path=STEP10_1_PROMPT_TEMPLATE,
@@ -224,30 +239,33 @@ def generate_guide(question: str, llm: ChatOpenAI, conversation_id: str='fa1010'
     )
     context["input"] = context["question"]
 
-    # intent 추출
+    # Get intent
     context["intent_list"] = "\n".join(intent_list)
     context["intent"] = guess_intent_chain.run(context).split(":")[0]
 
-    # chapter 추출
-    chapter_list = get_chapter_list(intent)
-    context["chapter_list"] = "\n".join(chapter_list)
-    context["chapter"] = guess_chapter_chain.run(context)
-
-    # web search
+    # Do web search
     context["compressed_web_search_results"] = query_web_search(
         context["question"],
+        search_tool=search_tool,
         search_value_check_chain=search_value_check_chain,
         search_compression_chain=search_compression_chain,
     )
 
-    # chat memory
+    # Get chat memory
     history_file = load_conversation_history(conversation_id)
     context["chat_history"] = get_chat_history(conversation_id)
 
     if context["intent"] in ("kakao_sync", "kakaotalk_channel", "kakao_social"):
+        # Get chapter
+        chapter_list = get_chapter_list(context["intent"])
+        context["chapter_list"] = "\n".join(chapter_list)
+        context["chapter"] = guess_chapter_chain.run(context)
+
+        # Get reladted documents
         context["related_documents"] = search_db(
-            context["intent"],
-            context["question"],
+            intent=context["intent"],
+            chapter=context["chapter"],
+            query=context["question"],
             chunk_size=CHUNK_SIZE,
             chunk_overlap=CHUNK_OVERLAP,
             use_retriever=USE_RETRIEVER,
@@ -259,10 +277,11 @@ def generate_guide(question: str, llm: ChatOpenAI, conversation_id: str='fa1010'
 
     log_user_message(history_file, question)
     log_bot_message(history_file, answer)
+
     return answer
 
 
-def prompt_with_langchain(query, model="gpt-3.5-turbo", temperature=0.0, max_tokens=512, use_functions=True):
+def prompt_with_langchain(query: str, model: str="gpt-3.5-turbo", temperature: float=0.0, max_tokens: int=2048, conversation_id: str='abcdef') -> str:
     kakao_expert_llm = ChatOpenAI(
         model=model,
         temperature=temperature,
@@ -272,50 +291,18 @@ def prompt_with_langchain(query, model="gpt-3.5-turbo", temperature=0.0, max_tok
     guide = generate_guide(
         question=query,
         llm=kakao_expert_llm,
-        conversation_id='dsds'
+        conversation_id=conversation_id,
     )
-    if use_functions:
-        print("functions 사용 - agent를 생성해 문제에 응답합니다")
 
-        functions = [
-            {
-                "name": "search_db",
-                "func": lambda x: search_db(guide),
-                "description": "Function to search extra information related to query from the database of Kakao sync"
-            }
-        ]
-
-        tools = [
-            Tool(
-                **func
-            ) for func in functions
-        ]
-
-        agent = initialize_agent(
-            tools,
-            kakao_expert_llm,
-            agent=AgentType.OPENAI_FUNCTIONS,
-            verbose=True
-        )
-
-        result = agent.run(
-            query
-        )
-
-    else:
-        print("functions 미사용 - multi chain 으로 문제에 응답합니다.")
-
-        result = guide
-
-    return result
+    return guide
 
 
-def callback_handler(request: ChatbotRequest) -> dict:
+def callback_handler(request: ChatbotRequest) -> None:
     # ===================== start =================================
     output_text = prompt_with_langchain(
         query=request.userRequest.utterance,
-        use_functions=True,
-        max_tokens=2048,
+        max_tokens=MAX_TOKENS,
+        conversation_id=CONVERSATION_ID,
     )
 
     print(output_text)
